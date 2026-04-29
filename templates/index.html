@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Interview Simulator</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; line-height: 1.4; color: #1a1a1a; }
+    body { max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.35rem; }
+    label { display: block; font-weight: 600; margin-top: 1rem; }
+    input[type="text"], textarea { width: 100%; box-sizing: border-box; margin-top: 0.35rem; padding: 0.5rem; }
+    textarea { min-height: 5rem; }
+    button { margin-top: 1rem; padding: 0.5rem 1rem; cursor: pointer; }
+    .card { border: 1px solid #ccc; border-radius: 6px; padding: 1rem; margin-top: 1rem; background: #fafafa; }
+    .meta { font-size: 0.85rem; color: #555; margin-bottom: 0.5rem; }
+    .err { color: #a00; margin-top: 0.5rem; }
+    .hidden { display: none; }
+    button:disabled { opacity: 0.6; cursor: wait; }
+    #interview-next-loading, #summary-loading-hint {
+      margin-top: 0.75rem;
+      color: #444;
+      font-size: 0.95rem;
+    }
+    #step-result h2 { margin-bottom: 0.75rem; }
+    .summary-topic { margin: 0 0 1rem; font-size: 1rem; }
+    .summary-topic strong { color: #333; }
+    .summary-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1rem;
+      align-items: center;
+      margin-bottom: 1rem;
+      font-size: 0.9rem;
+      color: #444;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: capitalize;
+      background: #e8e8e8;
+      color: #222;
+    }
+    .badge.low { background: #fdeccc; color: #7a4a00; }
+    .badge.medium { background: #dbeafe; color: #1e3a5f; }
+    .badge.high { background: #d1fae5; color: #065f46; }
+    .summary-block { margin-top: 1rem; }
+    .summary-block h3 {
+      font-size: 0.95rem;
+      margin: 0 0 0.5rem;
+      font-weight: 600;
+      color: #333;
+    }
+    .summary-list { margin: 0; padding-left: 1.25rem; }
+    .summary-list li { margin-bottom: 0.35rem; }
+    .muted { color: #777; font-size: 0.9rem; margin: 0; }
+    .sentiment {
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      margin-top: 0.5rem;
+      border: 1px solid #ddd;
+      background: #fafafa;
+    }
+    .sentiment.positive { border-color: #86efac; background: #f0fdf4; }
+    .sentiment.neutral { border-color: #e5e5e5; background: #fafafa; }
+    .sentiment.negative { border-color: #fca5a5; background: #fef2f2; }
+    .sentiment-label {
+      font-weight: 700;
+      font-size: 0.85rem;
+      text-transform: capitalize;
+      margin-bottom: 0.35rem;
+    }
+    .sentiment-expl { margin: 0; font-size: 0.95rem; line-height: 1.45; }
+    .kw-wrap { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.35rem; }
+    .kw {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 0.25rem;
+      padding: 0.2rem 0.5rem;
+      background: #eef;
+      border-radius: 4px;
+      font-size: 0.85rem;
+    }
+    .kw-n { font-size: 0.75rem; color: #555; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>AI Interview Simulator</h1>
+  <p>Enter a topic. You get <strong>one question at a time</strong> (3–5 rounds); each answer shapes the next prompt. When the interview ends, a structured summary loads automatically.</p>
+
+  <section id="step-topic">
+    <label for="topic">Topic</label>
+    <input id="topic" type="text" placeholder="e.g. Python async" />
+    <button type="button" id="btn-start">Start interview</button>
+    <div id="err-start" class="err hidden"></div>
+  </section>
+
+  <section id="step-answers" class="hidden">
+    <div id="interview-active-block">
+      <h2>Current question</h2>
+      <div id="question-slot"></div>
+      <div id="err-next" class="err hidden"></div>
+    </div>
+    <div id="interview-next-loading" class="hidden">Loading next question…</div>
+  </section>
+
+  <div id="err-summary" class="err hidden"></div>
+
+  <section id="step-result" class="hidden">
+    <h2>Summary</h2>
+    <p id="summary-loading-hint" class="hidden">Generating your feedback…</p>
+    <div id="summary-out" class="card"></div>
+  </section>
+
+  <script>
+    let session = { topic: "", questions: [], qa_pairs: [] };
+
+    function show(el, on) { el.classList.toggle("hidden", !on); }
+
+    function formatHttpError(data) {
+      if (!data || data.detail === undefined || data.detail === null) return "Request failed";
+      const d = data.detail;
+      if (typeof d === "string") return d;
+      if (Array.isArray(d)) {
+        return d
+          .map((x) => (typeof x.msg === "string" ? x.msg : JSON.stringify(x)))
+          .join("; ");
+      }
+      return String(d);
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    function renderBulletList(items) {
+      if (!items || !items.length) return '<p class="muted">None noted.</p>';
+      return '<ul class="summary-list">' + items.map(function (x) {
+        return "<li>" + escapeHtml(x) + "</li>";
+      }).join("") + "</ul>";
+    }
+
+    function renderSummaryHtml(data) {
+      var s = data.summary;
+      var bonus = data.bonus_analysis || {};
+      var keywords = bonus.keywords || [];
+      var topic = escapeHtml(data.topic || "");
+      var conf = (s.confidence || "").toLowerCase();
+      var sent = s.sentiment || {};
+      var label = (sent.label || "neutral").toLowerCase();
+      if (label !== "positive" && label !== "negative" && label !== "neutral") label = "neutral";
+
+      var html = "";
+      html += '<p class="summary-topic"><strong>Topic:</strong> ' + topic + "</p>";
+      html += '<div class="summary-meta">';
+      html += '<span>Debrief confidence:</span> <span class="badge ' + escapeHtml(conf) + '">' + escapeHtml(s.confidence || "—") + "</span>";
+      html += "</div>";
+
+      html += '<div class="summary-block"><h3>Key themes</h3>' + renderBulletList(s.key_themes) + "</div>";
+
+      html += '<div class="summary-block"><h3>Sentiment</h3>';
+      html += '<div class="sentiment ' + escapeHtml(label) + '">';
+      html += '<div class="sentiment-label">' + escapeHtml(sent.label || "neutral") + "</div>";
+      html += '<p class="sentiment-expl">' + escapeHtml(sent.explanation || "") + "</p>";
+      html += "</div></div>";
+
+      html += '<div class="summary-block"><h3>Strengths</h3>' + renderBulletList(s.strengths) + "</div>";
+      html += '<div class="summary-block"><h3>Areas for improvement</h3>' + renderBulletList(s.areas_for_improvement) + "</div>";
+      html += '<div class="summary-block"><h3>Notable points</h3>' + renderBulletList(s.notable_points) + "</div>";
+
+      html += '<div class="summary-block"><h3>Keywords (from your answers)</h3>';
+      if (!keywords.length) {
+        html += '<p class="muted">None extracted.</p>';
+      } else {
+        html += '<div class="kw-wrap">';
+        keywords.forEach(function (k) {
+          html += '<span class="kw">' + escapeHtml(k.term) + ' <span class="kw-n">×' + String(k.count) + "</span></span>";
+        });
+        html += "</div>";
+      }
+      html += "</div>";
+
+      return html;
+    }
+
+    function setInterviewQuestionUiVisible(on) {
+      show(document.getElementById("interview-active-block"), on);
+    }
+
+    function teardownQuestionCardSync() {
+      document.getElementById("question-slot").innerHTML = "";
+      setInterviewQuestionUiVisible(false);
+    }
+
+    function showNextQuestionLoading(on) {
+      show(document.getElementById("interview-next-loading"), on);
+    }
+
+    async function postNext() {
+      const res = await fetch("/interview/question/next", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic: session.topic,
+          qa_pairs: session.qa_pairs,
+          questions: session.questions.length ? session.questions : undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(formatHttpError(data) || res.statusText);
+      return data;
+    }
+
+    /** Returns true if summary JSON was shown. */
+    async function fetchSummary() {
+      const err = document.getElementById("err-summary");
+      const out = document.getElementById("summary-out");
+      const hint = document.getElementById("summary-loading-hint");
+      const stepResult = document.getElementById("step-result");
+      err.textContent = "";
+      show(err, false);
+      if (!session.qa_pairs.length) {
+        err.textContent = "No answers to summarize yet.";
+        show(err, true);
+        return false;
+      }
+      stepResult.classList.remove("hidden");
+      show(hint, true);
+      out.innerHTML = "";
+      try {
+        const res = await fetch("/interview/summary", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            topic: session.topic,
+            qa_pairs: session.qa_pairs,
+            questions: session.questions,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(formatHttpError(data) || res.statusText);
+        show(hint, false);
+        out.innerHTML = renderSummaryHtml(data);
+        document.getElementById("step-answers").classList.add("hidden");
+        showNextQuestionLoading(false);
+        stepResult.scrollIntoView({ behavior: "smooth", block: "start" });
+        return true;
+      } catch (e) {
+        show(hint, false);
+        out.innerHTML = "";
+        err.textContent = e.message || String(e);
+        show(err, true);
+        return false;
+      }
+    }
+
+    async function finishWithSummaryOnly() {
+      document.getElementById("step-answers").classList.remove("hidden");
+      showNextQuestionLoading(false);
+      const ok = await fetchSummary();
+      if (!ok) {
+        document.getElementById("step-answers").classList.add("hidden");
+      }
+    }
+
+    function renderQuestionCard(q, answerPrefill) {
+      const root = document.getElementById("question-slot");
+      const fill = answerPrefill != null && answerPrefill !== "" ? escapeHtml(answerPrefill) : "";
+      root.innerHTML =
+        '<div class="card" id="current-card" data-qid="' + escapeHtml(q.id) + '">' +
+        '<div class="meta">' + escapeHtml(q.id) + " · " + escapeHtml(q.difficulty) + " · " + escapeHtml(q.intent) + "</div>" +
+        "<strong>" + escapeHtml(q.text) + "</strong>" +
+        '<label>Your answer<textarea id="current-answer" class="ans">' + fill + "</textarea></label>" +
+        '<button type="button" id="btn-submit-answer">Submit answer</button>' +
+        "</div>";
+      document.getElementById("btn-submit-answer").onclick = onSubmitAnswer;
+    }
+
+    function scrollCardIntoView() {
+      const el = document.getElementById("current-card");
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    function restoreQuestionAfterFailedSubmit(popped) {
+      const q = session.questions.find((x) => x.id === popped.question_id);
+      if (!q) return;
+      setInterviewQuestionUiVisible(true);
+      renderQuestionCard(q, popped.answer);
+      scrollCardIntoView();
+    }
+
+    async function onSubmitAnswer() {
+      const errNext = document.getElementById("err-next");
+      const err = errNext;
+      err.textContent = "";
+      show(err, false);
+      const card = document.getElementById("current-card");
+      if (!card) return;
+      const qid = card.dataset.qid;
+      const q = session.questions.find((x) => x.id === qid);
+      const ansEl = document.getElementById("current-answer");
+      const answer = (ansEl && ansEl.value) ? ansEl.value.trim() : "";
+      if (!answer) {
+        err.textContent = "Please enter an answer.";
+        show(err, true);
+        return;
+      }
+      if (!q) {
+        err.textContent = "Missing question in session.";
+        show(err, true);
+        return;
+      }
+      session.qa_pairs.push({
+        question_id: q.id,
+        question_text: q.text,
+        answer: answer,
+      });
+
+      teardownQuestionCardSync();
+      showNextQuestionLoading(true);
+      document.getElementById("step-answers").classList.remove("hidden");
+
+      const terminalFive = session.qa_pairs.length >= 5;
+
+      try {
+        if (terminalFive) {
+          showNextQuestionLoading(false);
+          await finishWithSummaryOnly();
+          return;
+        }
+        const data = await postNext();
+        showNextQuestionLoading(false);
+        if (data.interview_complete) {
+          await finishWithSummaryOnly();
+          return;
+        }
+        if (data.question) {
+          session.questions.push(data.question);
+          setInterviewQuestionUiVisible(true);
+          renderQuestionCard(data.question, "");
+          scrollCardIntoView();
+        }
+      } catch (e) {
+        showNextQuestionLoading(false);
+        const popped = session.qa_pairs.pop();
+        if (popped) {
+          restoreQuestionAfterFailedSubmit(popped);
+        }
+        err.textContent = e.message || String(e);
+        show(err, true);
+      }
+    }
+
+    document.getElementById("btn-start").onclick = async () => {
+      const topic = document.getElementById("topic").value.trim();
+      const err = document.getElementById("err-start");
+      const btn = document.getElementById("btn-start");
+      const label = btn.textContent;
+      err.textContent = "";
+      show(err, false);
+      if (!topic) { err.textContent = "Topic required."; show(err, true); return; }
+      btn.disabled = true;
+      btn.textContent = "Loading…";
+      session = { topic, questions: [], qa_pairs: [] };
+      setInterviewQuestionUiVisible(true);
+      document.getElementById("err-summary").textContent = "";
+      show(document.getElementById("err-summary"), false);
+      show(document.getElementById("summary-loading-hint"), false);
+      try {
+        const data = await postNext();
+        session.topic = data.topic;
+        document.getElementById("step-answers").classList.remove("hidden");
+        document.getElementById("step-result").classList.add("hidden");
+        document.getElementById("summary-out").innerHTML = "";
+        if (data.interview_complete) {
+          setInterviewQuestionUiVisible(false);
+          document.getElementById("question-slot").innerHTML = "";
+          const ok = await fetchSummary();
+          if (!ok) {
+            document.getElementById("step-answers").classList.add("hidden");
+          }
+        } else if (data.question) {
+          session.questions.push(data.question);
+          renderQuestionCard(data.question, "");
+          scrollCardIntoView();
+        }
+      } catch (e) {
+        err.textContent = e.message || String(e);
+        show(err, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = label;
+      }
+    };
+  </script>
+</body>
+</html>
